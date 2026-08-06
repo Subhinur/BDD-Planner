@@ -1,5 +1,6 @@
 const { app, BrowserWindow, Menu, shell } = require("electron");
 const path = require("path");
+const { isAllowedExternalUrl } = require("./security.cjs");
 
 const isDev = Boolean(process.env.ELECTRON_START_URL);
 
@@ -21,8 +22,14 @@ function createWindow() {
   Menu.setApplicationMenu(null);
 
   window.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    if (isAllowedExternalUrl(url)) void shell.openExternal(url);
     return { action: "deny" };
+  });
+
+  window.webContents.on("will-navigate", (event, url) => {
+    if (url === window.webContents.getURL()) return;
+    event.preventDefault();
+    if (isAllowedExternalUrl(url)) void shell.openExternal(url);
   });
 
   if (isDev) {

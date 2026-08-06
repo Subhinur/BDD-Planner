@@ -29,13 +29,16 @@ Single-user local task planner scoped for one person on one machine.
 - Light/dark mode toggle with persisted preference
 - Text size slider with persisted preference
 - Local summary, today's plan, and task stats
+- JSON task backup and restore with validation and replacement confirmation
 
 ## Setup
 
-1. Install dependencies:
+Node.js 22 is the supported development runtime (see `.nvmrc`).
+
+1. Install dependencies from the lockfile:
 
 ```powershell
-npm install
+npm ci
 ```
 
 2. Run the app locally:
@@ -90,6 +93,15 @@ npm run dist
 
 Creates desktop app packages for the current platform using Electron Builder.
 
+Run the same quality gates used by CI:
+
+```powershell
+npm test
+npm run lint
+npx tsc --noEmit
+npm run build:web
+```
+
 ## Local Data
 
 Tasks and UI preferences are stored on the user's machine using `localStorage`. In the desktop app, this data belongs to the installed app profile on that computer.
@@ -99,6 +111,14 @@ Task storage key:
 ```text
 desktopPlanner.tasks
 ```
+
+If task storage is malformed, the original bytes are copied before the sanitized task list is saved:
+
+```text
+desktopPlanner.tasks.recovery
+```
+
+Use **details → Backup → export tasks** before moving devices or reinstalling. Restore with **import tasks** and select that JSON file. Import validates every task and asks before replacing current data; malformed backups are rejected without changing saved tasks.
 
 Preference storage keys:
 

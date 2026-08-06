@@ -1,22 +1,21 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
-
-type Status = "DRAFT" | "IN_PROGRESS" | "REVIEW" | "DONE";
-type Priority = "LOW" | "MEDIUM" | "HIGH";
-
-type Task = {
-  id: string;
-  title: string;
-  description: string | null;
-  status: Status;
-  priority: Priority;
-  category: string | null;
-  dueDate: string | null;
-  progress: number;
-  createdAt: string;
-  updatedAt: string;
-};
+import { ChangeEvent, FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  groupTasksByDate,
+  loadTasks,
+  parseStringList,
+  readValue,
+  saveTasks,
+  saveValue,
+  statusToProgress,
+  taskDateKey,
+  TASK_RECOVERY_STORAGE_KEY,
+  TASK_STORAGE_KEY,
+  type Priority,
+  type Status,
+  type Task
+} from "@/lib/planner";
 
 const columns: Array<{ id: Status; label: string; className: string }> = [
   { id: "DRAFT", label: "draft", className: "draft" },
@@ -25,15 +24,7 @@ const columns: Array<{ id: Status; label: string; className: string }> = [
   { id: "DONE", label: "done", className: "done" }
 ];
 
-const statusToProgress: Record<Status, number> = {
-  DRAFT: 0,
-  IN_PROGRESS: 45,
-  REVIEW: 85,
-  DONE: 100
-};
-
 const defaultTags = ["planning", "design", "errand", "home", "personal"];
-const TASK_STORAGE_KEY = "desktopPlanner.tasks";
 const TAG_STORAGE_KEY = "desktopPlanner.customTags";
 const HIDDEN_TAG_STORAGE_KEY = "desktopPlanner.hiddenTags";
 const THEME_STORAGE_KEY = "desktopPlanner.theme";
@@ -61,9 +52,6 @@ function localDateKey(date: Date) {
   return `${year}-${month}-${day}`;
 }
 
-function taskDateKey(task: Task) {
-  return task.dueDate ? toDateInput(task.dueDate) : "none";
-}
 
 function todayKey() {
   return localDateKey(new Date());
@@ -87,53 +75,6 @@ function formatDate(value: string | null) {
   return DATE_FORMATTER.format(new Date(`${value.slice(0, 10)}T00:00:00`));
 }
 
-function groupLabel(task: Task) {
-  if (!task.dueDate) return "No due date";
-  if (isOverdue(task)) return "Overdue";
-
-  const key = taskDateKey(task);
-  const currentToday = todayKey();
-  if (key === currentToday) return "Today";
-  if (key === localDateKey(addDays(new Date(), 1))) return "Tomorrow";
-  return formatDate(task.dueDate);
-}
-
-function groupTasksByDate(tasks: Task[]) {
-  const groups: Array<{ label: string; tasks: Task[] }> = [];
-
-  tasks.forEach((task) => {
-    const label = groupLabel(task);
-    const group = groups.find((item) => item.label === label);
-    if (group) {
-      group.tasks.push(task);
-    } else {
-      groups.push({ label, tasks: [task] });
-    }
-  });
-
-  return groups;
-}
-
-function normalizeTask(raw: unknown): Task | null {
-  if (!raw || typeof raw !== "object") return null;
-  const item = raw as Partial<Task>;
-  if (!item.id || !item.title || !item.status || !item.priority) return null;
-  if (!columns.some((column) => column.id === item.status)) return null;
-  if (!["LOW", "MEDIUM", "HIGH"].includes(item.priority)) return null;
-
-  return {
-    id: item.id,
-    title: item.title,
-    description: item.description || null,
-    status: item.status,
-    priority: item.priority,
-    category: item.category || "personal",
-    dueDate: item.dueDate || null,
-    progress: Number.isFinite(item.progress) ? Number(item.progress) : statusToProgress[item.status],
-    createdAt: item.createdAt || new Date().toISOString(),
-    updatedAt: item.updatedAt || new Date().toISOString()
-  };
-}
 
 function starterTasks(): Task[] {
   const now = new Date().toISOString();
@@ -197,6 +138,9 @@ export function DashboardClient() {
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const modalRef = useRef<HTMLDivElement>(null);
+  const modalTriggerRef = useRef<HTMLElement | null>(null);
+  const importInputRef = useRef<HTMLInputElement>(null);
 
   const tagOptions = useMemo(() => {
     const taskTags = tasks.map((task) => task.category || "personal");
@@ -204,46 +148,56 @@ export function DashboardClient() {
     return Array.from(new Set([...defaultTags, ...taskTags, ...customTags, ...editingTag]))
       .filter((tag) => tag === editingTask?.category || !hiddenTags.includes(tag))
       .sort();
-  }, [customTags, editingTask?.category, hiddenTags, tasks]);
+  }, [customTags, editingTask, hiddenTags, tasks]);
 
   useEffect(() => {
-    try {
-      const storedTasks = JSON.parse(localStorage.getItem(TASK_STORAGE_KEY) || "null");
-      const normalizedTasks = Array.isArray(storedTasks)
-        ? storedTasks.map(normalizeTask).filter((task): task is Task => Boolean(task))
-        : [];
-      setTasks(normalizedTasks.length ? normalizedTasks : starterTasks());
-
-      const storedTags = JSON.parse(localStorage.getItem(TAG_STORAGE_KEY) || "[]");
-      if (Array.isArray(storedTags)) {
-        setCustomTags(storedTags.filter((tag) => typeof tag === "string"));
-      }
-
-      const storedHiddenTags = JSON.parse(localStorage.getItem(HIDDEN_TAG_STORAGE_KEY) || "[]");
-      if (Array.isArray(storedHiddenTags)) {
-        setHiddenTags(storedHiddenTags.filter((tag) => typeof tag === "string"));
-      }
-    } catch {
-      setTasks(starterTasks());
-      setCustomTags([]);
-      setHiddenTags([]);
-    } finally {
-      setTasksReady(true);
+    const storedTasks = readValue(localStorage, TASK_STORAGE_KEY);
+    if (storedTasks.error) {
+      // Browser storage is available only after SSR, so failures are surfaced from this effect.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setError(storedTasks.error);
+      return;
     }
+
+    const result = loadTasks(storedTasks.value, starterTasks);
+    const storedCustomTags = readValue(localStorage, TAG_STORAGE_KEY);
+    const storedHiddenTags = readValue(localStorage, HIDDEN_TAG_STORAGE_KEY);
+    // Browser storage is available only after SSR, so hydration must initialize state here.
+    setTasks(result.tasks);
+    setCustomTags(parseStringList(storedCustomTags.value));
+    setHiddenTags(parseStringList(storedHiddenTags.value));
+    if (storedCustomTags.error || storedHiddenTags.error) {
+      setError(storedCustomTags.error || storedHiddenTags.error || "Saved preferences could not be read.");
+    }
+
+    if (result.recovery) {
+      try {
+        localStorage.setItem(TASK_RECOVERY_STORAGE_KEY, result.recovery);
+      } catch {
+        setError("Saved tasks could not be read or backed up. Storage was left unchanged.");
+        setTasksReady(false);
+        return;
+      }
+    }
+
+    if (result.warning) setError(result.warning);
+    setTasksReady(true);
   }, []);
 
   useEffect(() => {
-    const storedTheme = localStorage.getItem(THEME_STORAGE_KEY);
-    if (storedTheme === "dark" || storedTheme === "light") {
-      setTheme(storedTheme);
+    const storedTheme = readValue(localStorage, THEME_STORAGE_KEY);
+    if (storedTheme.value === "dark" || storedTheme.value === "light") {
+      // Browser-only preferences are hydrated after the initial server render.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setTheme(storedTheme.value);
     }
 
-    const storedFontSize = Number(localStorage.getItem(FONT_SIZE_STORAGE_KEY));
+    const storedFontSize = Number(readValue(localStorage, FONT_SIZE_STORAGE_KEY).value);
     if (Number.isFinite(storedFontSize) && storedFontSize >= 14 && storedFontSize <= 20) {
       setFontSize(storedFontSize);
     }
 
-    const storedDetailsPanel = localStorage.getItem(DETAILS_PANEL_STORAGE_KEY);
+    const storedDetailsPanel = readValue(localStorage, DETAILS_PANEL_STORAGE_KEY).value;
     if (storedDetailsPanel === "open" || storedDetailsPanel === "closed") {
       setDetailsOpen(storedDetailsPanel === "open");
     }
@@ -251,29 +205,47 @@ export function DashboardClient() {
 
   useEffect(() => {
     if (!tasksReady) return;
-    localStorage.setItem(TASK_STORAGE_KEY, JSON.stringify(tasks));
+    const saveError = saveTasks(localStorage, tasks);
+    // A failed external-system synchronization must be visible to the user.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (saveError) setError(saveError);
   }, [tasks, tasksReady]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
-    localStorage.setItem(THEME_STORAGE_KEY, theme);
+    const saveError = saveValue(localStorage, THEME_STORAGE_KEY, theme);
+    // Report failures while synchronizing browser preferences.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (saveError) setError(saveError);
   }, [theme]);
 
   useEffect(() => {
     document.documentElement.style.fontSize = `${fontSize}px`;
-    localStorage.setItem(FONT_SIZE_STORAGE_KEY, String(fontSize));
+    const saveError = saveValue(localStorage, FONT_SIZE_STORAGE_KEY, String(fontSize));
+    // Report failures while synchronizing browser preferences.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (saveError) setError(saveError);
   }, [fontSize]);
 
   useEffect(() => {
-    localStorage.setItem(DETAILS_PANEL_STORAGE_KEY, detailsOpen ? "open" : "closed");
+    const saveError = saveValue(localStorage, DETAILS_PANEL_STORAGE_KEY, detailsOpen ? "open" : "closed");
+    // Report failures while synchronizing browser preferences.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (saveError) setError(saveError);
   }, [detailsOpen]);
 
   useEffect(() => {
-    localStorage.setItem(TAG_STORAGE_KEY, JSON.stringify(customTags));
+    const saveError = saveValue(localStorage, TAG_STORAGE_KEY, JSON.stringify(customTags));
+    // Report failures while synchronizing browser preferences.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (saveError) setError(saveError);
   }, [customTags]);
 
   useEffect(() => {
-    localStorage.setItem(HIDDEN_TAG_STORAGE_KEY, JSON.stringify(hiddenTags));
+    const saveError = saveValue(localStorage, HIDDEN_TAG_STORAGE_KEY, JSON.stringify(hiddenTags));
+    // Report failures while synchronizing browser preferences.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (saveError) setError(saveError);
   }, [hiddenTags]);
 
   const visibleTasks = useMemo(() => {
@@ -318,12 +290,16 @@ export function DashboardClient() {
 
   useEffect(() => {
     if (dateWindowStart > maxDateWindowStart) {
+      // Keep navigation state inside the newly derived date range.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setDateWindowStart(maxDateWindowStart);
     }
   }, [dateWindowStart, maxDateWindowStart]);
 
   useEffect(() => {
     if (selectedDate !== "all" && !allDateTabs.some((tab) => tab.key === selectedDate)) {
+      // Reset a selection that disappeared after filtering or deletion.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setSelectedDate("all");
     }
   }, [allDateTabs, selectedDate]);
@@ -333,8 +309,11 @@ export function DashboardClient() {
     const index = allDateTabs.findIndex((tab) => tab.key === selectedDate);
     if (index < 0) return;
     if (index < dateWindowStart) {
+      // Reveal a selected date that moved outside the current window.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setDateWindowStart(index);
     } else if (index >= dateWindowStart + 7) {
+      // Reveal a selected date that moved outside the current window.
       setDateWindowStart(Math.min(index - 6, maxDateWindowStart));
     }
   }, [allDateTabs, dateWindowStart, maxDateWindowStart, selectedDate]);
@@ -379,7 +358,7 @@ export function DashboardClient() {
       priority: String(form.get("priority") || "MEDIUM") as Priority,
       category: String(form.get("category") || "personal"),
       dueDate: String(form.get("dueDate") || "") || null,
-      progress: Number(form.get("progress") || statusToProgress[status])
+      progress: statusToProgress[status]
     };
 
     setTasks((current) => {
@@ -398,8 +377,7 @@ export function DashboardClient() {
       return current.map((task) => task.id === editingTask.id ? { ...task, ...payload, updatedAt: now } : task);
     });
 
-    setModalOpen(false);
-    setEditingTask(null);
+    closeModal();
   }
 
   function updateTask(taskId: string, body: Partial<Task>) {
@@ -420,16 +398,55 @@ export function DashboardClient() {
   }
 
   function openCreateModal() {
+    modalTriggerRef.current = document.activeElement as HTMLElement | null;
     setEditingTask(null);
     setError("");
     setModalOpen(true);
   }
 
   function openEditModal(task: Task) {
+    modalTriggerRef.current = document.activeElement as HTMLElement | null;
     setEditingTask(task);
     setError("");
     setModalOpen(true);
   }
+
+  function closeModal() {
+    setModalOpen(false);
+    setEditingTask(null);
+    requestAnimationFrame(() => modalTriggerRef.current?.focus());
+  }
+
+  function handleModalKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeModal();
+      return;
+    }
+
+    if (event.key !== "Tab" || !modalRef.current) return;
+    const focusable = Array.from(modalRef.current.querySelectorAll<HTMLElement>(
+      "button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])"
+    ));
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  useEffect(() => {
+    if (!modalOpen) return;
+    requestAnimationFrame(() => {
+      modalRef.current?.querySelector<HTMLInputElement>("input[name='title']")?.focus();
+    });
+  }, [modalOpen]);
 
   function addTag() {
     const tag = newTag.trim().toLowerCase().replace(/\s+/g, "-");
@@ -445,7 +462,33 @@ export function DashboardClient() {
   }
 
   function clearCompleted() {
+    if (!window.confirm("Clear all completed tasks? This cannot be undone.")) return;
     setTasks((current) => current.filter((task) => task.status !== "DONE"));
+  }
+
+  function exportTasks() {
+    const url = URL.createObjectURL(new Blob([JSON.stringify(tasks, null, 2)], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `bdd-planner-backup-${todayKey()}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function importTasks(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+
+    try {
+      const result = loadTasks(await file.text(), () => []);
+      if (result.recovery) throw new Error("invalid backup");
+      if (!window.confirm(`Replace ${tasks.length} tasks with ${result.tasks.length} tasks from this backup?`)) return;
+      setTasks(result.tasks);
+      setError("");
+    } catch {
+      setError("Backup could not be imported. Choose a valid BDD Planner JSON backup.");
+    }
   }
 
   return (
@@ -555,7 +598,7 @@ export function DashboardClient() {
             </button>
           </nav>
 
-          {error ? <p className="form-error board-error">{error}</p> : null}
+          {error ? <p className="form-error board-error" role="alert">{error}</p> : null}
 
           {selectedTasks.length === 0 ? (
             <div className="board-empty">
@@ -588,7 +631,7 @@ export function DashboardClient() {
                     </header>
                     <div className="card-list">
                       {taskGroups.length ? taskGroups.map((group) => (
-                        <div className="task-group" key={`${column.id}-${group.label}`}>
+                        <div className="task-group" key={`${column.id}-${group.key}`}>
                           <div className="task-group-header">
                             <span>{group.label}</span>
                             <b>{group.tasks.length}</b>
@@ -652,11 +695,11 @@ export function DashboardClient() {
           </section>
 
           <section className="panel-section">
-            <h2 className="panel-title">Today's plan</h2>
+            <h2 className="panel-title">Today&apos;s plan</h2>
             <div className="plan-list">
               {tasks.filter((task) => taskDateKey(task) === todayKey()).slice(0, 4).map((task, index) => (
                 <div className="plan-row" key={task.id}>
-                  <span className="plan-time">{index === 0 ? "09:00" : index === 1 ? "11:30" : index === 2 ? "14:00" : "16:00"}</span>
+                  <span className="plan-time">due</span>
                   <div className={`plan-card ${index % 2 ? "teal" : "purple"}`}>
                     <strong>{task.title}</strong>
                     <span>{task.status.toLowerCase().replace("_", " ")}</span>
@@ -681,15 +724,36 @@ export function DashboardClient() {
               </button>
             </div>
           </section>
+
+          <section className="panel-section">
+            <h2 className="panel-title">Backup</h2>
+            <div className="profile-card compact">
+              <button className="button wide-button" type="button" onClick={exportTasks}>export tasks</button>
+              <button className="button wide-button" type="button" onClick={() => importInputRef.current?.click()}>import tasks</button>
+              <input
+                ref={importInputRef}
+                hidden
+                type="file"
+                accept="application/json,.json"
+                onChange={importTasks}
+              />
+            </div>
+          </section>
         </aside>
       </main>
 
       {modalOpen ? (
-        <div className="modal-shell open" role="dialog" aria-modal="true">
-          <div className="modal">
+        <div
+          className="modal-shell open"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="task-modal-title"
+          onKeyDown={handleModalKeyDown}
+        >
+          <div className="modal" ref={modalRef}>
             <div className="modal-head">
-              <h2 className="modal-title">{editingTask ? "Edit task" : "Add task"}</h2>
-              <button className="button" type="button" onClick={() => setModalOpen(false)}>close</button>
+              <h2 className="modal-title" id="task-modal-title">{editingTask ? "Edit task" : "Add task"}</h2>
+              <button className="button" type="button" onClick={closeModal}>close</button>
             </div>
             <form className="modal-form" onSubmit={createOrUpdateTask}>
               <label className="field">
@@ -752,13 +816,9 @@ export function DashboardClient() {
                   <input name="dueDate" type="date" defaultValue={toDateInput(editingTask?.dueDate || null)} />
                 </label>
               </div>
-              <label className="field">
-                <span className="field-label">Progress percent</span>
-                <input name="progress" type="number" min="0" max="100" defaultValue={editingTask?.progress || 0} />
-              </label>
               {error ? <p className="form-error">{error}</p> : null}
               <div className="modal-actions">
-                <button className="button" type="button" onClick={() => setModalOpen(false)}>cancel</button>
+                <button className="button" type="button" onClick={closeModal}>cancel</button>
                 <button className="button primary" type="submit">{editingTask ? "save task" : "create task"}</button>
               </div>
             </form>
