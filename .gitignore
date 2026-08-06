@@ -4,6 +4,7 @@ out
 .env
 .env.local
 *.log
+*.tsbuildinfo
 dist
 release
 coverage
