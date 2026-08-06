@@ -1,0 +1,63 @@
+{
+  "name": "desktop-task-planner",
+  "version": "0.1.0",
+  "private": true,
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "build:web": "next build && powershell -NoProfile -ExecutionPolicy Bypass -Command \"if (Test-Path dist) { Remove-Item -Recurse -Force dist }; Move-Item out dist\"",
+    "start": "next start",
+    "lint": "next lint",
+    "desktop": "npm run build:web && electron .",
+    "dist": "npm run build:web && electron-builder",
+    "dist:win": "npm run build:web && electron-builder --win nsis"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "electron": "^43.0.0",
+    "electron-builder": "^26.15.3",
+    "eslint": "^8.57.1",
+    "eslint-config-next": "^14.2.23",
+    "next": "^14.2.23",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.7.2"
+  },
+  "build": {
+    "appId": "com.local.desktop-task-planner",
+    "productName": "Desktop Task Planner",
+    "directories": {
+      "output": "release"
+    },
+    "compression": "maximum",
+    "files": [
+      "electron/**/*",
+      "dist/**/*",
+      "package.json",
+      "!**/*.map",
+      "!**/*.md",
+      "!**/*.ts",
+      "!**/*.d.ts",
+      "!**/test/**",
+      "!**/tests/**",
+      "!**/__tests__/**",
+      "!**/docs/**"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "artifactName": "${productName} Setup ${version}.${ext}",
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}
